@@ -1,15 +1,15 @@
 /*
- * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: CC0-1.0
+ * Mini Weather station, implement with reading sensors with I2C,
+ * and displaying on OLED screen with I2C
  */
-
 #include <stdio.h>
+#include <string.h>
 
 #include "bmx280.h"
 #include "dht11.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
+#include "driver/uart.h"
 #include "esp_err.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -19,14 +19,7 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "sdkconfig.h"
-
-#include "driver/uart.h"
 #include "soc/uart_periph.h"
-#include "esp_rom_gpio.h"
-#include "hal/gpio_hal.h"
-#include "sdkconfig.h"
-#include <string.h>
-
 
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_SH1107
 #include "esp_lcd_sh1107.h"
@@ -39,15 +32,15 @@ static const char *TAG = "TPH";
 #define I2C_BUS_PORT 0
 #define I2C_BUS_PORT2 1
 
-//Defining UART Pins
-#define EX_UART_NUM UART_NUM_0
+// Defining UART Pins
+#define UART_NUM UART_NUM_0
 
 #define UARTS_BAUD_RATE 115200
 #define BUF_SIZE 1024
 #define RD_BUF_SIZE BUF_SIZE
 #define PATTERN_CHR_NUM 3
-
-static QueueHandle_t uart0_queue;
+#define TXD_PIN 43
+#define RXD_PIN 44
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Please update the following configuration according to your LCD spec //////////////////////////////
@@ -70,10 +63,10 @@ static QueueHandle_t uart0_queue;
 #define EXAMPLE_LCD_CMD_BITS 8
 #define EXAMPLE_LCD_PARAM_BITS 8
 
-void uart_event_task(void*);
+void uart_event_task(void *);
 extern void example_lvgl_demo_ui(lv_disp_t *disp, char *message, int i);
 
-char* dtmp;
+char *dtmp;
 
 void temp_sens(lv_disp_t *disp) {
     // Entry Point
@@ -92,7 +85,7 @@ void temp_sens(lv_disp_t *disp) {
     ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_1, &i2c_cfg));
     ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_1, I2C_MODE_MASTER, 0, 0, 0));
 
-    bmx280_t* bmx280 = bmx280_create(I2C_NUM_1);
+    bmx280_t *bmx280 = bmx280_create(I2C_NUM_1);
 
     if (!bmx280) {
         ESP_LOGE("test", "Could not create bmx280 driver.");
@@ -117,21 +110,31 @@ void temp_sens(lv_disp_t *disp) {
             do {
                 vTaskDelay(pdMS_TO_TICKS(1));
             } while (bmx280_isSampling(bmx280));
-            
+
             float temp = 0, pres = 0, hum = 0;
             ESP_ERROR_CHECK(bmx280_readoutFloat(bmx280, &temp, &pres, &hum));
             hum = DHT11_read().humidity;
             ESP_LOGI(TAG, "Read Values: temp = %.2f, pres = %.2f, hum = %.2f", temp, pres, hum);
             ESP_LOGI(TAG, "Status code is %d", DHT11_read().status);
-            if (i % 3 == 1)
-                sprintf(dis, "%.2f", pres);
-            else if (i % 3 == 2)
-                sprintf(dis, "%.0f", hum);
-            else
-                sprintf(dis, "%.0f", temp);
-            example_lvgl_demo_ui(disp, dis, i++ % 3);
-            // vTaskDelay(10000 / portTICK_PERIOD_MS);
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            example_lvgl_demo_ui(disp, dis, i);
+            if (*dtmp == 'b') {
+                i++;
+                if (i % 3 == 1)
+                    sprintf(dis, "%.2f", pres);
+                else if (i % 3 == 2)
+                    sprintf(dis, "%.0f", hum);
+                else
+                    sprintf(dis, "%.0f", temp);
+                example_lvgl_demo_ui(disp, dis, i % 3);
+            } else {
+                if (i % 3 == 1)
+                    sprintf(dis, "%.2f", pres);
+                else if (i % 3 == 2)
+                    sprintf(dis, "%.0f", hum);
+                else
+                    sprintf(dis, "%.0f", temp);
+                example_lvgl_demo_ui(disp, dis, i++ % 3);
+            }
             if (*dtmp == 'p') {
                 sprintf(dis, "%.2f", pres);
                 example_lvgl_demo_ui(disp, dis, 1);
@@ -145,121 +148,49 @@ void temp_sens(lv_disp_t *disp) {
                 example_lvgl_demo_ui(disp, dis, 0);
                 i = 3;
             }
+            vTaskDelay(pdMS_TO_TICKS(3000));
             *dtmp = 'z';
-
             // Release the mutex
             lvgl_port_unlock();
         }
     }
 }
 
-void uart() {
+void uart_init() {
     esp_log_level_set(TAG, ESP_LOG_INFO);
-    /* Configure parameters of an UART driver,
-     * communication pins and install the driver */
     uart_config_t uart_config = {
         .baud_rate = UARTS_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
+        .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart0_queue, 0);
-    uart_param_config(EX_UART_NUM, &uart_config);
+    uart_driver_install(UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, NULL, 0);
+    uart_param_config(UART_NUM, &uart_config);
 
     //Set UART log level
     esp_log_level_set(TAG, ESP_LOG_INFO);
     //Set UART pins (using UART0 default pins ie no changes.)
-    uart_set_pin(EX_UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_set_pin(UART_NUM, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
     //Set uart pattern detect function.
-    uart_enable_pattern_det_baud_intr(EX_UART_NUM, '+', 3, 9, 0, 0);
+    uart_enable_pattern_det_baud_intr(UART_NUM, '+', 3, 9, 0, 0);
     //Reset the pattern queue length to record at most 20 pattern positions.
-    uart_pattern_queue_reset(EX_UART_NUM, 20);
+    uart_pattern_queue_reset(UART_NUM, 20);
 
     //Create a task to handler UART event from ISR
     xTaskCreate(uart_event_task, "uart_event_task", 2048, NULL, 12, NULL);
 }
 
-void uart_event_task(void *pvParameters)
-{
-    uart_event_t event;
-    size_t buffered_size;
-    dtmp = (char*) malloc(RD_BUF_SIZE);
-    for (;;) {
-        //Waiting for UART event.
-        if (xQueueReceive(uart0_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
-            bzero(dtmp, RD_BUF_SIZE);
-            ESP_LOGI(TAG, "uart[%d] event:", EX_UART_NUM);
-            switch (event.type) {
-            //Event of UART receving data
-            /*We'd better handler data event fast, there would be much more data events than
-            other types of events. If we take too much time on data event, the queue might
-            be full.*/
-            case UART_DATA:
-                ESP_LOGI(TAG, "[UART DATA]: %d", event.size);
-                uart_read_bytes(EX_UART_NUM, dtmp, event.size, portMAX_DELAY);
-                                ESP_LOGI(TAG, "%c", *dtmp);
-
-                ESP_LOGI(TAG, "[DATA EVT]:");
-                uart_write_bytes(EX_UART_NUM, dtmp, event.size);
-                ESP_LOGI(TAG, "%c", *dtmp);
-                break;
-            //Event of HW FIFO overflow detected
-            case UART_FIFO_OVF:
-                ESP_LOGI(TAG, "hw fifo overflow");
-                // If fifo overflow happened, you should consider adding flow control for your application.
-                // The ISR has already reset the rx FIFO,
-                // As an example, we directly flush the rx buffer here in order to read more data.
-                uart_flush_input(EX_UART_NUM);
-                xQueueReset(uart0_queue);
-                break;
-            //Event of UART ring buffer full
-            case UART_BUFFER_FULL:
-                ESP_LOGI(TAG, "ring buffer full");
-                // If buffer full happened, you should consider increasing your buffer size
-                // As an example, we directly flush the rx buffer here in order to read more data.
-                uart_flush_input(EX_UART_NUM);
-                xQueueReset(uart0_queue);
-                break;
-            //Event of UART RX break detected
-            case UART_BREAK:
-                ESP_LOGI(TAG, "uart rx break");
-                break;
-            //Event of UART parity check error
-            case UART_PARITY_ERR:
-                ESP_LOGI(TAG, "uart parity error");
-                break;
-            //Event of UART frame error
-            case UART_FRAME_ERR:
-                ESP_LOGI(TAG, "uart frame error");
-                break;
-            //UART_PATTERN_DET
-            case UART_PATTERN_DET:
-                uart_get_buffered_data_len(EX_UART_NUM, &buffered_size);
-                int pos = uart_pattern_pop_pos(EX_UART_NUM);
-                ESP_LOGI(TAG, "[UART PATTERN DETECTED] pos: %d, buffered size: %d", pos, buffered_size);
-                if (pos == -1) {
-                    // There used to be a UART_PATTERN_DET event, but the pattern position queue is full so that it can not
-                    // record the position. We should set a larger queue size.
-                    // As an example, we directly flush the rx buffer here.
-                    uart_flush_input(EX_UART_NUM);
-                } else {
-                    uart_read_bytes(EX_UART_NUM, dtmp, pos, 100 / portTICK_PERIOD_MS);
-                    uint8_t pat[PATTERN_CHR_NUM + 1];
-                    memset(pat, 0, sizeof(pat));
-                    uart_read_bytes(EX_UART_NUM, pat, PATTERN_CHR_NUM, 100 / portTICK_PERIOD_MS);
-                    ESP_LOGI(TAG, "read data: %s", dtmp);
-                    ESP_LOGI(TAG, "read pat : %s", pat);
-                }
-                break;
-            //Others
-            default:
-                break;
-            }
-        }
+void uart_event_task(void *pvParameters) {
+    dtmp = (char *)calloc(BUF_SIZE, sizeof(char *));
+    while (1) {
+        // Read data from the UART
+        int len = uart_read_bytes(UART_NUM, dtmp, BUF_SIZE, 20 / portTICK_PERIOD_MS);
+        if (len > 0)
+            ESP_LOGI(TAG, "Received %d bytes: '%s'", len, dtmp); // Print the received data
     }
     free(dtmp);
     dtmp = NULL;
@@ -267,7 +198,6 @@ void uart_event_task(void *pvParameters)
 }
 
 void app_main(void) {
-    uart();
     ESP_LOGI(TAG, "Initialize I2C");
     i2c_config_t i2c_cfg = {
         .mode = I2C_MODE_MASTER,
@@ -344,5 +274,6 @@ void app_main(void) {
     /* Rotation of the screen */
     lv_disp_set_rotation(disp, LV_DISP_ROT_NONE);
 
+    uart_init();
     temp_sens(disp);
 }

@@ -1,6 +1,6 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
-  "idf.port": "/dev/cu.SLAB_USBtoUART",
+  "idf.port": "/dev/cu.usbserial-10",
   "idf.adapterTargetName": "esp32s3",
   "idf.openOcdConfigs": [
     "board/esp32s3-bridge.cfg"
